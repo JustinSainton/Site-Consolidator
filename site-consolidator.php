@@ -38,6 +38,15 @@ class WP_Site_Consolidator {
 	private static $_old_new_relationship = array();
 
 	/**
+	 * Stores array of old comment IDs and new comment IDs for migration.  Pattern is [old_id] => [new_id]
+	 *
+	 * @since 1.0
+	 * @var array
+	 * @access private
+	 */
+	private static $_old_new_comments = array();
+
+	/**
 	 * What we have here is no failure to communicate
 	 * 
 	 * We're doing a couple things, really.  Building out a UI to consolidate sites, for one.  Site consolidation is :
@@ -242,7 +251,7 @@ class WP_Site_Consolidator {
 	 * @return void
 	 */
 	public static function process_consolidation() {
-		
+
 		ini_set( 'display_errors', '1' );
 		error_reporting( E_ALL );
 		//Sanity checks.  
@@ -266,7 +275,7 @@ class WP_Site_Consolidator {
 		foreach ( $old_ids as $blog_id ) {
 			self::migrate_posts( $blog_id, $new_id );
 			self::migrate_authors( $new_id );
-			self::migrate_comments( $blog_id, $new_id );
+			//self::migrate_comments( $blog_id, $new_id ); Not quite ready for prime time
 			self::migrate_attachments( $blog_id, $new_id );
 			self::add_canonical_redirects( $blog_id, $new_id );
 		}
@@ -428,7 +437,27 @@ class WP_Site_Consolidator {
 	}
 
 	private static function migrate_comments( $old_id, $new_id ) {
+		
+		//Grab old comments - we could (should) probably maintain comment hierarchy on this side of things
+		switch_to_blog( $old_id );
 
+		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id ) {
+			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
+		}
+
+		restore_current_blog();
+		switch_to_blog( $new_id );
+
+		//Need to add hierarchy here.
+		foreach ( $comments as $post_id => $comments ) {
+			foreach( $comments as $comment ) get_comments( array( 'post_id' => 2 ) ) {
+				$comment = (array) $comment;
+				$comment['comment_post_ID'] = $post_id;
+				wp_insert_comment( $comment );
+			}
+		}
+
+		restore_current_blog();
 	}
 
 	/**
