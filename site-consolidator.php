@@ -376,7 +376,7 @@ class WP_Site_Consolidator {
 						foreach( $child_post['meta'] as $key => $value ) {
 							//Need to loop through the values, in case there are multiple values
 							foreach ( $value as $unique_value ) {
-								add_post_meta( $parent_id, $key, maybe_unserialize( $unique_value ) );
+								add_post_meta( $new_child_id, $key, maybe_unserialize( $unique_value ) );
 							}
 						}
 					}
