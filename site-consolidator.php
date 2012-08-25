@@ -274,7 +274,7 @@ class WP_Site_Consolidator {
 
 		foreach ( $old_ids as $blog_id ) {
 			self::migrate_posts( $blog_id, $new_id );
-			self::migrate_authors( $new_id );
+			self::migrate_authors( $blog_id, $new_id );
 			//self::migrate_comments( $blog_id, $new_id ); Not quite ready for prime time
 			self::migrate_attachments( $blog_id, $new_id );
 			self::add_canonical_redirects( $blog_id, $new_id );
@@ -307,8 +307,6 @@ class WP_Site_Consolidator {
 		$old_posts = get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => '0' ) );
 
 		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
-		$terms = $tax_api->get_terms( 'wpsc_product_category', array( 'orderby' => 'count' ) );
-		die( var_dump( $terms ) );
 
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
 		foreach ( $tax_api->get_taxonomies() as $tax ) {
@@ -388,25 +386,27 @@ class WP_Site_Consolidator {
 			}
 		}
 
+		$new_tax_api = new WP_JSON_Taxonomy_API( $new_blog_id );
+
 		//Inserts terms, if the taxonomy exists and the term doesn't
 		foreach ( self::$_tax_object as $tax => $terms ) {
 
 			//If the taxonomy doesn't exist, we're not going to do the hackery necessary to register taxonomies via saved options and work-around activation routines, etc.
-			if ( taxonomy_exists( $tax ) ) {
+			if ( $new_tax_api->taxonomy_exists( $tax ) ) {
 
 				foreach( $terms as $term => $objects_in_term ) {
 					
 					//If the term already exists, we're not going to override it.  That'd just be silly.
-					if ( ! term_exists( $term, $tax ) ) {
+					if ( ! $new_tax_api->term_exists( $term, $tax ) ) {
 
 						//This is a bit of a hacky way to ensure we've set up the parent first
-						if ( isset( $term['parent'] ) && ! term_exists( $term['parent'], $tax ) ) {
+						if ( isset( $term['parent'] ) && ! $new_tax_api->term_exists( $term['parent'], $tax ) ) {
 							//Sets up parent term first.  We'll set up the child term outside the check.
-							wp_insert_term( $term['parent'], $tax );
+							$new_tax_api->wp_insert_term( $term['parent'], $tax );
 						}
 
 						//Now we insert the term.  We've already created the parent term if it didn't exist.  Now we just conditionally add a parent if we need to.
-						wp_insert_term( $term, $tax, array( 'parent' => isset( $term['parent'] ) ? get_term_by( 'slug', $term['parent'], $tax )->term_id : 0 ) );
+						$new_tax_api->wp_insert_term( $term, $tax, array( 'parent' => isset( $term['parent'] ) ? get_term_by( 'slug', $term['parent'], $tax )->term_id : 0 ) );
 					}
 				}
 			}
@@ -416,7 +416,7 @@ class WP_Site_Consolidator {
 		foreach ( self::$_tax_object as $tax => $terms ) {
 			foreach( $terms as $term => $objects_in_term ) {
 				foreach( $objects_in_term as $object_id )
-					wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
+					$new_tax_api->wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
 			}
 		}
 
@@ -429,16 +429,20 @@ class WP_Site_Consolidator {
 	 * @param  int $new_id 
 	 * @return void
 	 */
-	private static function migrate_authors( $new_id ) {
-		echo '<pre />' . print_r( self::$_tax_object , 1 );
+	private static function migrate_authors( $blog_id, $new_id ) {
+
 		$user_ids = array_unique( wp_filter_object_list( self::$_posts, array(), 'AND', 'post_author' ) );
 
-		die( '<pre />' . print_r( $user_ids ) );
 		foreach ( $user_ids as $user_id ) {
-			$roles = get_userdata( $user_id )->roles;
-			add_user_to_blog( $new_id, $user_id, $roles[0] );
-		}
+			switch_to_blog( $blog_id );
+				$roles = get_userdata( $user_id )->roles;
+			restore_current_blog();
 
+			switch_to_blog( $new_id );
+				add_user_to_blog( $new_id, $user_id, $roles[0] );
+			restore_current_blog();
+		}
+	
 	}
 
 	private static function migrate_comments( $old_id, $new_id ) {
@@ -513,10 +517,12 @@ class WP_Site_Consolidator {
  * After much hackery and tomfoolery, I think this is probably as decent a solution as we'll get to ensure the taxonomy API
  * is relatively portable in a switch_to_blog() setting.
  * 
+ * Will this scale? No. 
+ * Is this hyper-performant? No.
+ * Should it work marvelously for this specific use case?  You betcha.
+ * 
  * This is essentially a wrapper function for the native WP Taxonomy API.  Sends requests.
  * 
- * @package default
- * @todo Currently only exposing the parameters
  */
 class WP_JSON_Taxonomy_API {
 
@@ -533,52 +539,113 @@ class WP_JSON_Taxonomy_API {
 
 		$this->_site_url = get_blog_details( $blog_id )->siteurl . '?json_api=true&function=';
 		return $this;
-	
 	}
 
 	public function get_taxonomies() {
+
 		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_taxonomies' ) ) );
 	}
 
 	public function get_terms( $taxonomies, $args = array() ) {
-		$query = http_build_query( array( 'args' => array( 'taxonomies' => $taxonomies, 'args' => $args ) ) );
+		$query = http_build_query( array( 
+			'args' => array( 
+				'taxonomies' => $taxonomies, 
+				'args'       => $args 
+				) 
+			) 
+		);
+
 		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_terms&' . $query ) ) );
 	}
 
-	public function get_objects_in_term() {
+	public function get_objects_in_term( $term_ids, $taxonomies, $args = array() ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'term_ids'   => $term_ids, 
+				'taxonomies' => $taxonomies, 
+				'args'       => $args 
+				) 
+			) 
+		);
 
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_objects_in_term&' . $query ) ) );
 	}
 
-	public function get_term_by() {
+	public function get_term_by( $field, $value, $taxonomy, $output = OBJECT, $filter = 'raw' ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'field'    => $field, 
+				'value'    => $value, 
+				'taxonomy' => $taxonomy,
+				'output'   => $output,
+				'filter'   => $filter
+				) 
+			) 
+		);
 
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_term_by&' . $query ) ) );
 	}
 
-	public function taxonomy_exists() {
+	public function taxonomy_exists( $taxonomy ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'taxonomy' => $taxonomy
+				) 
+			) 
+		);
 
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'taxonomy_exists&' . $query ) ) );
 	}
 
-	public function term_exists() {
-
+	public function term_exists( $term, $taxonomy, $parent = '' ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'term'     => $term, 
+				'taxonomy' => $taxonomy, 
+				'parent'   => $parent
+				) 
+			) 
+		);
+		$result = json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'term_exists&' . $query ) ) );
+		
+		return ! is_null( $result ) && 0 !== $result;
 	}
 
-	public function wp_insert_term() {
+	public function wp_insert_term( $term, $taxonomy, $args = array() ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'term'     => $term, 
+				'taxonomy' => $taxonomy, 
+				'args'     => $args
+				) 
+			) 
+		);
 
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'wp_insert_term&' . $query ) ) );
 	}
 
-	public function wp_set_object_terms() {
+	public function wp_set_object_terms( $object_id, $terms, $taxonomy, $append = false ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'object_id' => $object_id, 
+				'terms'     => $terms, 
+				'taxonomy'  => $taxonomy,
+				'append'    => $append
+				) 
+			) 
+		);
 
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'wp_set_object_terms&' . $query ) ) );
 	}
 
 }
 
 /**
- * After much hackery and tomfoolery, I think this is probably as decent a solution as we'll get to ensure the taxonomy API
- * is relatively portable in a switch_to_blog() setting.
  * 
  * This is essentially a wrapper function for the native WP Taxonomy API.  Receives requests.  Sends responses.
  * A bit of props to westi for the JSON endpoint code on trac
  * 
- * @package default
+ * @package WP_JSON_Taxonomy_API
  */
 class WP_JSON_Taxonomy_API_Handler {
 
@@ -598,6 +665,7 @@ class WP_JSON_Taxonomy_API_Handler {
 	}
 
 	public function init() {
+
 		add_rewrite_endpoint( 'json_api', EP_ROOT ^ EP_PERMALINK ^ EP_ALL );
 	}
 
@@ -621,7 +689,6 @@ class WP_JSON_Taxonomy_API_Handler {
 			die( json_encode( $function() ) );
 
 		die( json_encode( call_user_func_array( $function, $_GET['args'] ) ) );
-
 	}
 
 }
