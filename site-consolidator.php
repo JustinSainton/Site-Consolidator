@@ -57,7 +57,6 @@ class WP_Site_Consolidator {
 	 * 
 	 * Not currently running wpmu_delete_blog() against consolidated blogs - though with enough QA, might be worth considering.
 	 * 
-	 * @return type
 	 */	
 	public static function init() {
 
@@ -273,9 +272,10 @@ class WP_Site_Consolidator {
 		wp_suspend_cache_invalidation( true );
 
 		foreach ( $old_ids as $blog_id ) {
+			self::$_posts = self::$_tax_object = self::$_old_new_relationship = self::$_old_new_comments = array();
 			self::migrate_posts( $blog_id, $new_id );
 			self::migrate_authors( $blog_id, $new_id );
-			//self::migrate_comments( $blog_id, $new_id ); Not quite ready for prime time
+			self::migrate_comments( $blog_id, $new_id ); //Not quite ready for prime time
 			self::migrate_attachments( $blog_id, $new_id );
 			self::add_canonical_redirects( $blog_id, $new_id );
 		}
@@ -413,6 +413,7 @@ class WP_Site_Consolidator {
 		}
 
 		//Create term / object relationships
+		//L:420 is returning some undefined index notices.  Gotta look into that.
 		foreach ( self::$_tax_object as $tax => $terms ) {
 			foreach( $terms as $term => $objects_in_term ) {
 				foreach( $objects_in_term as $object_id )
