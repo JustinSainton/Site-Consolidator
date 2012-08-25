@@ -306,14 +306,18 @@ class WP_Site_Consolidator {
 
 		$old_posts = get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => '0' ) );
 
+		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
+		$terms = $tax_api->get_terms( 'wpsc_product_category', array( 'orderby' => 'count' ) );
+		die( var_dump( $terms ) );
+
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
-		foreach ( get_taxonomies() as $tax ) {
-			$terms = get_terms( $tax );	
+		foreach ( $tax_api->get_taxonomies() as $tax ) {
+			$terms = $tax_api->get_terms( $tax );
 			if ( ! empty( $terms ) ) {
 				foreach ( $terms as $term ) {
-					self::$_tax_object[$tax][$term->slug] = get_objects_in_term( $term->term_id, $tax );
+					self::$_tax_object[$tax][$term->slug] = $tax_api->get_objects_in_term( $term->term_id, $tax );
 					if ( $term->parent )
-						self::$_tax_object[$tax][$term->slug]['parent'] = get_term_by( 'id', $term->parent, $tax )->slug;
+						self::$_tax_object[$tax][$term->slug]['parent'] = $tax_api->get_term_by( 'id', $term->parent, $tax )->slug;
 				}
 			}
 		}
@@ -426,9 +430,10 @@ class WP_Site_Consolidator {
 	 * @return void
 	 */
 	private static function migrate_authors( $new_id ) {
-
+		echo '<pre />' . print_r( self::$_tax_object , 1 );
 		$user_ids = array_unique( wp_filter_object_list( self::$_posts, array(), 'AND', 'post_author' ) );
 
+		die( '<pre />' . print_r( $user_ids ) );
 		foreach ( $user_ids as $user_id ) {
 			$roles = get_userdata( $user_id )->roles;
 			add_user_to_blog( $new_id, $user_id, $roles[0] );
@@ -450,7 +455,7 @@ class WP_Site_Consolidator {
 
 		//Need to add hierarchy here.
 		foreach ( $comments as $post_id => $comments ) {
-			foreach( $comments as $comment ) get_comments( array( 'post_id' => 2 ) ) {
+			foreach( $comments as $comment ) {
 				$comment = (array) $comment;
 				$comment['comment_post_ID'] = $post_id;
 				wp_insert_comment( $comment );
@@ -504,6 +509,124 @@ class WP_Site_Consolidator {
 
 }
 
-add_action( 'plugins_loaded', array( 'WP_Site_Consolidator', 'init' ) );
+/**
+ * After much hackery and tomfoolery, I think this is probably as decent a solution as we'll get to ensure the taxonomy API
+ * is relatively portable in a switch_to_blog() setting.
+ * 
+ * This is essentially a wrapper function for the native WP Taxonomy API.  Sends requests.
+ * 
+ * @package default
+ * @todo Currently only exposing the parameters
+ */
+class WP_JSON_Taxonomy_API {
+
+	/**
+	 * The site URL for the blog ID provided
+	 *
+	 * @since 1.0
+	 * @var string
+	 * @access private
+	 */
+	private $_site_url;
+
+	public function __construct( $blog_id ) {
+
+		$this->_site_url = get_blog_details( $blog_id )->siteurl . '?json_api=true&function=';
+		return $this;
+	
+	}
+
+	public function get_taxonomies() {
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_taxonomies' ) ) );
+	}
+
+	public function get_terms( $taxonomies, $args = array() ) {
+		$query = http_build_query( array( 'args' => array( 'taxonomies' => $taxonomies, 'args' => $args ) ) );
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_terms&' . $query ) ) );
+	}
+
+	public function get_objects_in_term() {
+
+	}
+
+	public function get_term_by() {
+
+	}
+
+	public function taxonomy_exists() {
+
+	}
+
+	public function term_exists() {
+
+	}
+
+	public function wp_insert_term() {
+
+	}
+
+	public function wp_set_object_terms() {
+
+	}
+
+}
+
+/**
+ * After much hackery and tomfoolery, I think this is probably as decent a solution as we'll get to ensure the taxonomy API
+ * is relatively portable in a switch_to_blog() setting.
+ * 
+ * This is essentially a wrapper function for the native WP Taxonomy API.  Receives requests.  Sends responses.
+ * A bit of props to westi for the JSON endpoint code on trac
+ * 
+ * @package default
+ */
+class WP_JSON_Taxonomy_API_Handler {
+
+	private static $instance;
+
+	public function __construct() {
+		add_action( 'init'             , array( $this, 'init' ) );
+		add_action( 'request'          , array( $this, 'request' ) );
+		add_action( 'template_redirect', array( $this, 'template_redirect' ) );
+	}
+
+	public function get_instance() {
+		if ( empty( self::$instance ) )
+			self::$instance = new WP_JSON_Taxonomy_API_Handler();
+
+		return self::$instance;
+	}
+
+	public function init() {
+		add_rewrite_endpoint( 'json_api', EP_ROOT ^ EP_PERMALINK ^ EP_ALL );
+	}
+
+	public function request( $query_vars ) {
+		if ( isset( $query_vars['json_api'] ) )
+			$query_vars['json_api'] = true;
+
+		return $query_vars;
+	}
+
+	public function template_redirect() {
+		if ( ! get_query_var( 'json_api' ) ) 
+			return true;
+
+ 		$function = esc_attr( $_GET['function'] );
+ 
+ 		if ( ! function_exists( $function ) )
+ 			return true;
+
+ 		if ( ! isset( $_GET['args'] ) )
+			die( json_encode( $function() ) );
+
+		die( json_encode( call_user_func_array( $function, $_GET['args'] ) ) );
+
+	}
+
+}
+
+add_action( 'plugins_loaded' , array( 'WP_Site_Consolidator'        , 'init' ) );
+add_action( 'plugins_loaded' , array( 'WP_JSON_Taxonomy_API_Handler', 'get_instance' ) );
 
 ?>
