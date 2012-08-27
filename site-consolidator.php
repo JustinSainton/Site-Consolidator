@@ -453,13 +453,21 @@ class WP_Site_Consolidator {
 	
 	}
 
+	/**
+	 * Recursive function 
+	 * 
+	 * @param type $old_id 
+	 * @param type $new_id 
+	 * @todo  Maybe handle comment meta.  I think the primary place core uses it is for trashing/spamming comments.  Might not be necessary
+	 */
 	private static function migrate_comments( $old_id, $new_id ) {
 		
-		//Grab old comments - we could (should) probably maintain comment hierarchy on this side of things
 		switch_to_blog( $old_id );
 
 		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id ) {
+			$comments = get_comments( array( 'post_id' => $old_post_id ) );
 			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
+
 		}
 
 		restore_current_blog();
@@ -470,7 +478,15 @@ class WP_Site_Consolidator {
 			foreach( $comments as $comment ) {
 				$comment = (array) $comment;
 				$comment['comment_post_ID'] = $post_id;
-				wp_insert_comment( $comment );
+				self::$_old_new_comments[$comment['comment_ID']] = wp_insert_comment( $comment );
+				if ( $comment['comment_parent'] )
+					self::$_old_new_comments[$comment['comment_ID']]['parent'] = $comment['comment_parent'];
+			}
+		}
+
+		foreach ( self::$_old_new_comments as $old_id => $new_id ) {
+			if ( isset( self::$_old_new_comments[$old_id]['parent'] ) ) {
+				wp_update_comment( array( 'comment_ID' => $new_id, 'comment_parent' => self::$_old_new_comments[self::$_old_new_comments[$old_id]['parent']] ) );
 			}
 		}
 
@@ -539,6 +555,12 @@ class WP_Site_Consolidator {
 		}
 	}
 
+	/**
+	 * Checks to see if a post has any children.
+	 * 
+	 * @param int $post_id 
+	 * @return array Array of posts, or empty array if none.
+	 */
 	private static function has_children( $post_id ) {
 		return get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_status' => 'any', 'post_parent' => absint( $post_id ) ) );
 	}
