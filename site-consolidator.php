@@ -310,7 +310,7 @@ class WP_Site_Consolidator {
 
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
 		foreach ( $tax_api->get_taxonomies() as $tax ) {
-			$terms = $tax_api->get_terms( $tax );
+			$terms = $tax_api->get_terms( $tax, array( 'hide_empty' => false ) );
 			if ( ! empty( $terms ) ) {
 				foreach ( $terms as $term ) {
 					self::$_tax_object[$tax][$term->slug] = $tax_api->get_objects_in_term( $term->term_id, $tax );
@@ -319,7 +319,6 @@ class WP_Site_Consolidator {
 				}
 			}
 		}
-
 		//Builds array of posts, child posts and post meta (for each)
 		foreach ( $old_posts as $post ) {
 
@@ -395,18 +394,22 @@ class WP_Site_Consolidator {
 			if ( $new_tax_api->taxonomy_exists( $tax ) ) {
 
 				foreach( $terms as $term => $objects_in_term ) {
-					
+					if ( isset( self::$_tax_object[$tax][$term]['parent'] ) )
+						$parent = self::$_tax_object[$tax][$term]['parent'];
+					else 
+						$parent = false;
 					//If the term already exists, we're not going to override it.  That'd just be silly.
 					if ( ! $new_tax_api->term_exists( $term, $tax ) ) {
-
 						//This is a bit of a hacky way to ensure we've set up the parent first
-						if ( isset( $term['parent'] ) && ! $new_tax_api->term_exists( $term['parent'], $tax ) ) {
+						if ( $parent && ! $new_tax_api->term_exists( $parent, $tax ) ) {
 							//Sets up parent term first.  We'll set up the child term outside the check.
-							$new_tax_api->wp_insert_term( $term['parent'], $tax );
+							$name = $tax_api->get_term_by( 'slug', $parent, $tax )->name;
+							$new_tax_api->wp_insert_term( $name, $tax );
 						}
 
+						$name = $tax_api->get_term_by( 'slug', $term, $tax )->name;
 						//Now we insert the term.  We've already created the parent term if it didn't exist.  Now we just conditionally add a parent if we need to.
-						$new_tax_api->wp_insert_term( $term, $tax, array( 'parent' => isset( $term['parent'] ) ? get_term_by( 'slug', $term['parent'], $tax )->term_id : 0 ) );
+						$new_tax_api->wp_insert_term( $name, $tax, array( 'parent' => ( $parent ) ? $new_tax_api->get_term_by( 'slug', $parent, $tax )->term_id : 0 ) );
 					}
 				}
 			}
