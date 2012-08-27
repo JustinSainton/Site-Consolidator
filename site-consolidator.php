@@ -251,8 +251,6 @@ class WP_Site_Consolidator {
 	 */
 	public static function process_consolidation() {
 
-		ini_set( 'display_errors', '1' );
-		error_reporting( E_ALL );
 		//Sanity checks.  
 		if ( 'admin_page_site-consolidator-network' != get_current_screen()->base || empty( $_POST ) )
 			return;
@@ -266,6 +264,7 @@ class WP_Site_Consolidator {
 		if ( false !== $key_check )
 			unset( $old_ids[$key_check] );
 
+		//More or less arbitrary - but the HTTP Taxonomy API is going to take quite a bit of time.
 		set_time_limit( 250 );
 
 		wp_suspend_cache_addition( true );
@@ -276,10 +275,15 @@ class WP_Site_Consolidator {
 			self::migrate_posts( $blog_id, $new_id );
 			self::migrate_authors( $blog_id, $new_id );
 			self::migrate_comments( $blog_id, $new_id ); //Not quite ready for prime time
+			self::reassign_post_meta( $blog_id, $new_id );
 			self::migrate_attachments( $blog_id, $new_id );
 			self::add_canonical_redirects( $blog_id, $new_id );
+
+			//Easiest way to flush rewrite rules on a blog we're not on.
+			delete_blog_option( $blog_id, 'rewrite_rules' );
 		}
 
+		delete_blog_option( $new_id, 'rewrite_rules' );
 		wp_suspend_cache_addition( false );
 		wp_suspend_cache_invalidation( false );
 	}
@@ -350,7 +354,6 @@ class WP_Site_Consolidator {
 		restore_current_blog();
 		switch_to_blog( $new_blog_id );
 
-		//TODO - check if we need to str_replace the guid
 		foreach( self::$_posts as $post_id => $post ) {
 
 			//Inserts 'parent' posts, related post meta and related terms.
@@ -416,7 +419,6 @@ class WP_Site_Consolidator {
 		}
 
 		//Create term / object relationships
-		//L:423 is returning some undefined index notices.  Gotta look into that.
 		foreach ( self::$_tax_object as $tax => $terms ) {
 			foreach( $terms as $term => $objects_in_term ) {
 				foreach( $objects_in_term as $object_id ) {
@@ -489,6 +491,18 @@ class WP_Site_Consolidator {
 		self::copy( WP_CONTENT_DIR . "/blogs.dir/{$old_id}/files/", WP_CONTENT_DIR . "/blogs.dir/{$new_id}/files/" );
 	}
 
+	/**
+	 * Whelp.  Just realized we need to re-assign post meta ids.
+	 * Specifically thinking for featured thumbnails, but potentially for others, too.
+	 * 
+	 * @param type $old_id 
+	 * @param type $new_id 
+	 * @return type
+	 */
+	private static function reassign_post_meta( $old_id, $new_id ) {
+
+	}
+
 	private static function add_canonical_redirects( $old_id, $new_id ) {
 	}
 
@@ -497,7 +511,7 @@ class WP_Site_Consolidator {
 		if ( is_dir( $source ) ) {
 			$dir_handle   = opendir( $source );
 			$sourcefolder = basename( $source );
-			wp_mkdir_p( $dest );
+			@mkdir( $dest );
 
 			while ( $file = readdir( $dir_handle ) ) {
 				if ( $file != '.' && $file != '..' ) {
@@ -507,7 +521,7 @@ class WP_Site_Consolidator {
 						copy( $source . '/' . $file, $dest . '/' . $file );
 				}
 			}
-		closedir( $dir_handle );
+			closedir( $dir_handle );
 		} else {
 			copy( $source, $dest );
 		}
