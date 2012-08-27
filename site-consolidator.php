@@ -416,11 +416,13 @@ class WP_Site_Consolidator {
 		}
 
 		//Create term / object relationships
-		//L:420 is returning some undefined index notices.  Gotta look into that.
+		//L:423 is returning some undefined index notices.  Gotta look into that.
 		foreach ( self::$_tax_object as $tax => $terms ) {
 			foreach( $terms as $term => $objects_in_term ) {
-				foreach( $objects_in_term as $object_id )
-					$new_tax_api->wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
+				foreach( $objects_in_term as $object_id ) {
+					if ( isset( self::$_old_new_relationship[$object_id] ) )
+						$new_tax_api->wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
+				}
 			}
 		}
 
