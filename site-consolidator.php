@@ -308,7 +308,7 @@ class WP_Site_Consolidator {
 		
 		switch_to_blog( $old_blog_id );
 
-		$old_posts = get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => '0' ) );
+		$old_posts = get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => '0', 'post_status' => 'any' ) );
 
 		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
 
@@ -495,12 +495,18 @@ class WP_Site_Consolidator {
 	 * Whelp.  Just realized we need to re-assign post meta ids.
 	 * Specifically thinking for featured thumbnails, but potentially for others, too.
 	 * 
-	 * @param type $old_id 
-	 * @param type $new_id 
-	 * @return type
+	 * @param int $old_id 
+	 * @param int $new_id 
 	 */
 	private static function reassign_post_meta( $old_id, $new_id ) {
+		
+		switch_to_blog( $new_id );
+		
+		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
+			if ( false !== ( $old_thumb_id = get_post_meta( $new_post_id, '_thumbnail_id', true ) ) )
+				update_post_meta( $new_post_id, '_thumbnail_id', self::$_old_new_relationship[$old_thumb_id] );
 
+		restore_current_blog();
 	}
 
 	private static function add_canonical_redirects( $old_id, $new_id ) {
@@ -534,7 +540,7 @@ class WP_Site_Consolidator {
 	}
 
 	private static function has_children( $post_id ) {
-		return get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => absint( $post_id ) ) );
+		return get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_status' => 'any', 'post_parent' => absint( $post_id ) ) );
 	}
 
 }
