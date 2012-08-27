@@ -506,24 +506,30 @@ class WP_Site_Consolidator {
 	private static function add_canonical_redirects( $old_id, $new_id ) {
 	}
 
-	private static function copy( $source, $dest ) {
+	/**
+	 * Recursively copies directory structure over.  Works well if directory already exists, or not.
+	 * 
+	 * @param string $source 
+	 * @param string $dest 
+	 */
+	private static function copy( $source, $destination ) {
  
 		if ( is_dir( $source ) ) {
-			$dir_handle   = opendir( $source );
-			$sourcefolder = basename( $source );
-			@mkdir( $dest );
-
-			while ( $file = readdir( $dir_handle ) ) {
-				if ( $file != '.' && $file != '..' ) {
-					if ( is_dir( $source . '/' . $file ) )
-						self::copy( $source . '/' . $file, $dest . '/' . $sourcefolder );
-					else
-						copy( $source . '/' . $file, $dest . '/' . $file );
+			wp_mkdir_p( $destination );
+			$directory = dir( $source );
+			while ( false !== ( $readdirectory = $directory->read() ) ) {
+				if ( '.' == $readdirectory || '..' == $readdirectory )
+					continue;
+				$pathdir = $source . '/' . $readdirectory; 
+				if ( is_dir( $pathdir ) ) {
+					self::copy( $pathdir, $destination . '/' . $readdirectory );
+					continue;
 				}
+				copy( $pathdir, $destination . '/' . $readdirectory );
 			}
-			closedir( $dir_handle );
+			$directory->close();
 		} else {
-			copy( $source, $dest );
+			copy( $source, $destination );
 		}
 	}
 
