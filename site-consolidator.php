@@ -454,7 +454,7 @@ class WP_Site_Consolidator {
 	}
 
 	/**
-	 * Recursive function 
+	 * Handles migration of comments. Maintains hierarchical relationships
 	 * 
 	 * @param type $old_id 
 	 * @param type $new_id 
@@ -464,29 +464,26 @@ class WP_Site_Consolidator {
 		
 		switch_to_blog( $old_id );
 
-		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id ) {
-			$comments = get_comments( array( 'post_id' => $old_post_id ) );
+		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
 			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
-
-		}
-
+		
 		restore_current_blog();
 		switch_to_blog( $new_id );
 
-		//Need to add hierarchy here.
 		foreach ( $comments as $post_id => $comments ) {
+			if ( empty( $comments ) )
+				continue;
+
+			krsort( $comments );
+
 			foreach( $comments as $comment ) {
 				$comment = (array) $comment;
 				$comment['comment_post_ID'] = $post_id;
-				self::$_old_new_comments[$comment['comment_ID']] = wp_insert_comment( $comment );
-				if ( $comment['comment_parent'] )
-					self::$_old_new_comments[$comment['comment_ID']]['parent'] = $comment['comment_parent'];
-			}
-		}
 
-		foreach ( self::$_old_new_comments as $old_id => $new_id ) {
-			if ( isset( self::$_old_new_comments[$old_id]['parent'] ) ) {
-				wp_update_comment( array( 'comment_ID' => $new_id, 'comment_parent' => self::$_old_new_comments[self::$_old_new_comments[$old_id]['parent']] ) );
+				if ( isset( self::$_old_new_comments[$comment['comment_parent']] ) )
+					$comment['comment_parent'] =  self::$_old_new_comments[$comment['comment_parent']];
+
+				self::$_old_new_comments[$comment['comment_ID']] = wp_insert_comment( $comment );
 			}
 		}
 
