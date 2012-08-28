@@ -111,7 +111,7 @@ class WP_Site_Consolidator {
 			<p><?php _e( 'What happens when you hit "Consolidate"?  A couple things:', 'site-consolidator' )?></p>
 			<ol>
 				<li><?php _e( 'All the posts, comments and images are migrated from the list of sites on the left to the site on the right.', 'site-consolidator' ); ?></li>
-				<li><?php _e( 'Canonical rewrites are saved to the database for images and posts.', 'site-consolidator' ); ?></li>
+				<li><?php _e( 'All taxonomies and terms (like categories and posts, for example) are migrated and assigned to the posts.', 'site-consolidator' ); ?></li>
 				<li><?php _e( 'Proper attribution is given to authors.  If post authors do not exist on the site migrated to, that will be handled automatically by granting that author access to the new site.', 'site-consolidator' ); ?></li>
 			</ol>
 
@@ -465,7 +465,7 @@ class WP_Site_Consolidator {
 		switch_to_blog( $old_id );
 
 		$comments = array();
-		
+
 		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
 			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
 		
