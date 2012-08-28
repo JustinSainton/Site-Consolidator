@@ -464,6 +464,8 @@ class WP_Site_Consolidator {
 		
 		switch_to_blog( $old_id );
 
+		$comments = array();
+		
 		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
 			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
 		
