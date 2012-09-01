@@ -590,7 +590,7 @@ class WP_JSON_Taxonomy_API {
 
 	public function __construct( $blog_id ) {
 
-		$this->_site_url = get_blog_details( $blog_id )->siteurl . '?json_api=true&function=';
+		$this->_site_url = esc_url_raw( get_blog_details( $blog_id )->siteurl . '?json_api=true&function=' );
 		return $this;
 	}
 
