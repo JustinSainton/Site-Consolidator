@@ -121,7 +121,7 @@ class WP_Site_Consolidator {
 					<select multiple name="sites-to-consolidate[]">
 						<?php 
 							foreach ( self::get_sites() as $site )
-								echo '<option value="' . $site->blog_id . '">' . $site->domain . '</option>';
+								echo '<option value="' . $site->blog_id . '">' . get_blog_option( $site->blog_id, 'blogname') . '</option>';
 						?>
 					</select>
 				</div>
@@ -130,7 +130,7 @@ class WP_Site_Consolidator {
 					<select name="catcher-site">
 						<?php 
 							foreach ( self::get_sites() as $site )
-								echo '<option value="' . $site->blog_id . '">' . $site->domain . '</option>';
+								echo '<option value="' . $site->blog_id . '">' . get_blog_option( $site->blog_id, 'blogname') . '</option>';
 						?>
 					</select>
 				</div>
