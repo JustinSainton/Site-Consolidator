@@ -57,7 +57,6 @@ class WP_Site_Consolidator {
 	 * 
 	 * Not currently running wpmu_delete_blog() against consolidated blogs - though with enough QA, might be worth considering.
 	 * 
-	 * @return type
 	 */	
 	public static function init() {
 
@@ -112,7 +111,7 @@ class WP_Site_Consolidator {
 			<p><?php _e( 'What happens when you hit "Consolidate"?  A couple things:', 'site-consolidator' )?></p>
 			<ol>
 				<li><?php _e( 'All the posts, comments and images are migrated from the list of sites on the left to the site on the right.', 'site-consolidator' ); ?></li>
-				<li><?php _e( 'Canonical rewrites are saved to the database for images and posts.', 'site-consolidator' ); ?></li>
+				<li><?php _e( 'All taxonomies and terms (like categories and posts, for example) are migrated and assigned to the posts.', 'site-consolidator' ); ?></li>
 				<li><?php _e( 'Proper attribution is given to authors.  If post authors do not exist on the site migrated to, that will be handled automatically by granting that author access to the new site.', 'site-consolidator' ); ?></li>
 			</ol>
 
@@ -122,7 +121,7 @@ class WP_Site_Consolidator {
 					<select multiple name="sites-to-consolidate[]">
 						<?php 
 							foreach ( self::get_sites() as $site )
-								echo '<option value="' . $site->blog_id . '">' . $site->domain . '</option>';
+								echo '<option value="' . $site->blog_id . '">' . get_blog_option( $site->blog_id, 'blogname') . '</option>';
 						?>
 					</select>
 				</div>
@@ -131,7 +130,7 @@ class WP_Site_Consolidator {
 					<select name="catcher-site">
 						<?php 
 							foreach ( self::get_sites() as $site )
-								echo '<option value="' . $site->blog_id . '">' . $site->domain . '</option>';
+								echo '<option value="' . $site->blog_id . '">' . get_blog_option( $site->blog_id, 'blogname') . '</option>';
 						?>
 					</select>
 				</div>
@@ -252,8 +251,6 @@ class WP_Site_Consolidator {
 	 */
 	public static function process_consolidation() {
 
-		ini_set( 'display_errors', '1' );
-		error_reporting( E_ALL );
 		//Sanity checks.  
 		if ( 'admin_page_site-consolidator-network' != get_current_screen()->base || empty( $_POST ) )
 			return;
@@ -267,19 +264,26 @@ class WP_Site_Consolidator {
 		if ( false !== $key_check )
 			unset( $old_ids[$key_check] );
 
+		//More or less arbitrary - but the HTTP Taxonomy API is going to take quite a bit of time.
 		set_time_limit( 250 );
 
 		wp_suspend_cache_addition( true );
 		wp_suspend_cache_invalidation( true );
 
 		foreach ( $old_ids as $blog_id ) {
+			self::$_posts = self::$_tax_object = self::$_old_new_relationship = self::$_old_new_comments = array();
 			self::migrate_posts( $blog_id, $new_id );
-			self::migrate_authors( $new_id );
-			//self::migrate_comments( $blog_id, $new_id ); Not quite ready for prime time
+			self::migrate_authors( $blog_id, $new_id );
+			self::migrate_comments( $blog_id, $new_id ); //Not quite ready for prime time
+			self::reassign_post_meta( $blog_id, $new_id );
 			self::migrate_attachments( $blog_id, $new_id );
 			self::add_canonical_redirects( $blog_id, $new_id );
+
+			//Easiest way to flush rewrite rules on a blog we're not on.
+			delete_blog_option( $blog_id, 'rewrite_rules' );
 		}
 
+		delete_blog_option( $new_id, 'rewrite_rules' );
 		wp_suspend_cache_addition( false );
 		wp_suspend_cache_invalidation( false );
 	}
@@ -304,20 +308,21 @@ class WP_Site_Consolidator {
 		
 		switch_to_blog( $old_blog_id );
 
-		$old_posts = get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => '0' ) );
+		$old_posts = get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => '0', 'post_status' => 'any' ) );
+
+		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
 
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
-		foreach ( get_taxonomies() as $tax ) {
-			$terms = get_terms( $tax );	
+		foreach ( $tax_api->get_taxonomies() as $tax ) {
+			$terms = $tax_api->get_terms( $tax, array( 'hide_empty' => false ) );
 			if ( ! empty( $terms ) ) {
 				foreach ( $terms as $term ) {
-					self::$_tax_object[$tax][$term->slug] = get_objects_in_term( $term->term_id, $tax );
+					self::$_tax_object[$tax][$term->slug] = $tax_api->get_objects_in_term( $term->term_id, $tax );
 					if ( $term->parent )
-						self::$_tax_object[$tax][$term->slug]['parent'] = get_term_by( 'id', $term->parent, $tax )->slug;
+						self::$_tax_object[$tax][$term->slug]['parent'] = $tax_api->get_term_by( 'id', $term->parent, $tax )->slug;
 				}
 			}
 		}
-
 		//Builds array of posts, child posts and post meta (for each)
 		foreach ( $old_posts as $post ) {
 
@@ -349,7 +354,6 @@ class WP_Site_Consolidator {
 		restore_current_blog();
 		switch_to_blog( $new_blog_id );
 
-		//TODO - check if we need to str_replace the guid
 		foreach( self::$_posts as $post_id => $post ) {
 
 			//Inserts 'parent' posts, related post meta and related terms.
@@ -376,7 +380,7 @@ class WP_Site_Consolidator {
 						foreach( $child_post['meta'] as $key => $value ) {
 							//Need to loop through the values, in case there are multiple values
 							foreach ( $value as $unique_value ) {
-								add_post_meta( $parent_id, $key, maybe_unserialize( $unique_value ) );
+								add_post_meta( $new_child_id, $key, maybe_unserialize( $unique_value ) );
 							}
 						}
 					}
@@ -384,25 +388,31 @@ class WP_Site_Consolidator {
 			}
 		}
 
+		$new_tax_api = new WP_JSON_Taxonomy_API( $new_blog_id );
+
 		//Inserts terms, if the taxonomy exists and the term doesn't
 		foreach ( self::$_tax_object as $tax => $terms ) {
 
 			//If the taxonomy doesn't exist, we're not going to do the hackery necessary to register taxonomies via saved options and work-around activation routines, etc.
-			if ( taxonomy_exists( $tax ) ) {
+			if ( $new_tax_api->taxonomy_exists( $tax ) ) {
 
 				foreach( $terms as $term => $objects_in_term ) {
-					
+					if ( isset( self::$_tax_object[$tax][$term]['parent'] ) )
+						$parent = self::$_tax_object[$tax][$term]['parent'];
+					else 
+						$parent = false;
 					//If the term already exists, we're not going to override it.  That'd just be silly.
-					if ( ! term_exists( $term, $tax ) ) {
-
+					if ( ! $new_tax_api->term_exists( $term, $tax ) ) {
 						//This is a bit of a hacky way to ensure we've set up the parent first
-						if ( isset( $term['parent'] ) && ! term_exists( $term['parent'], $tax ) ) {
+						if ( $parent && ! $new_tax_api->term_exists( $parent, $tax ) ) {
 							//Sets up parent term first.  We'll set up the child term outside the check.
-							wp_insert_term( $term['parent'], $tax );
+							$name = $tax_api->get_term_by( 'slug', $parent, $tax )->name;
+							$new_tax_api->wp_insert_term( $name, $tax );
 						}
 
+						$name = $tax_api->get_term_by( 'slug', $term, $tax )->name;
 						//Now we insert the term.  We've already created the parent term if it didn't exist.  Now we just conditionally add a parent if we need to.
-						wp_insert_term( $term, $tax, array( 'parent' => isset( $term['parent'] ) ? get_term_by( 'slug', $term['parent'], $tax )->term_id : 0 ) );
+						$new_tax_api->wp_insert_term( $name, $tax, array( 'parent' => ( $parent ) ? $new_tax_api->get_term_by( 'slug', $parent, $tax )->term_id : 0 ) );
 					}
 				}
 			}
@@ -411,8 +421,10 @@ class WP_Site_Consolidator {
 		//Create term / object relationships
 		foreach ( self::$_tax_object as $tax => $terms ) {
 			foreach( $terms as $term => $objects_in_term ) {
-				foreach( $objects_in_term as $object_id )
-					wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
+				foreach( $objects_in_term as $object_id ) {
+					if ( isset( self::$_old_new_relationship[$object_id] ) )
+						$new_tax_api->wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
+				}
 			}
 		}
 
@@ -425,35 +437,55 @@ class WP_Site_Consolidator {
 	 * @param  int $new_id 
 	 * @return void
 	 */
-	private static function migrate_authors( $new_id ) {
+	private static function migrate_authors( $blog_id, $new_id ) {
 
 		$user_ids = array_unique( wp_filter_object_list( self::$_posts, array(), 'AND', 'post_author' ) );
 
 		foreach ( $user_ids as $user_id ) {
-			$roles = get_userdata( $user_id )->roles;
-			add_user_to_blog( $new_id, $user_id, $roles[0] );
-		}
+			switch_to_blog( $blog_id );
+				$roles = get_userdata( $user_id )->roles;
+			restore_current_blog();
 
+			switch_to_blog( $new_id );
+				add_user_to_blog( $new_id, $user_id, $roles[0] );
+			restore_current_blog();
+		}
+	
 	}
 
+	/**
+	 * Handles migration of comments. Maintains hierarchical relationships
+	 * 
+	 * @param type $old_id 
+	 * @param type $new_id 
+	 * @todo  Maybe handle comment meta.  I think the primary place core uses it is for trashing/spamming comments.  Might not be necessary
+	 */
 	private static function migrate_comments( $old_id, $new_id ) {
 		
-		//Grab old comments - we could (should) probably maintain comment hierarchy on this side of things
 		switch_to_blog( $old_id );
 
-		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id ) {
-			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
-		}
+		$comments = array();
 
+		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
+			$comments[$new_post_id] = get_comments( array( 'post_id' => $old_post_id ) );
+		
 		restore_current_blog();
 		switch_to_blog( $new_id );
 
-		//Need to add hierarchy here.
 		foreach ( $comments as $post_id => $comments ) {
-			foreach( $comments as $comment ) get_comments( array( 'post_id' => 2 ) ) {
+			if ( empty( $comments ) )
+				continue;
+
+			krsort( $comments );
+
+			foreach( $comments as $comment ) {
 				$comment = (array) $comment;
 				$comment['comment_post_ID'] = $post_id;
-				wp_insert_comment( $comment );
+
+				if ( isset( self::$_old_new_comments[$comment['comment_parent']] ) )
+					$comment['comment_parent'] =  self::$_old_new_comments[$comment['comment_parent']];
+
+				self::$_old_new_comments[$comment['comment_ID']] = wp_insert_comment( $comment );
 			}
 		}
 
@@ -474,36 +506,247 @@ class WP_Site_Consolidator {
 		self::copy( WP_CONTENT_DIR . "/blogs.dir/{$old_id}/files/", WP_CONTENT_DIR . "/blogs.dir/{$new_id}/files/" );
 	}
 
+	/**
+	 * Whelp.  Just realized we need to re-assign post meta ids.
+	 * Specifically thinking for featured thumbnails, but potentially for others, too.
+	 * 
+	 * @param int $old_id 
+	 * @param int $new_id 
+	 */
+	private static function reassign_post_meta( $old_id, $new_id ) {
+		
+		switch_to_blog( $new_id );
+		
+		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
+			if ( false !== ( $old_thumb_id = get_post_meta( $new_post_id, '_thumbnail_id', true ) ) )
+				update_post_meta( $new_post_id, '_thumbnail_id', self::$_old_new_relationship[$old_thumb_id] );
+
+		restore_current_blog();
+	}
+
 	private static function add_canonical_redirects( $old_id, $new_id ) {
 	}
 
-	private static function copy( $source, $dest ) {
+	/**
+	 * Recursively copies directory structure over.  Works well if directory already exists, or not.
+	 * 
+	 * @param string $source 
+	 * @param string $dest 
+	 */
+	private static function copy( $source, $destination ) {
  
 		if ( is_dir( $source ) ) {
-			$dir_handle   = opendir( $source );
-			$sourcefolder = basename( $source );
-			wp_mkdir_p( $dest );
-
-			while ( $file = readdir( $dir_handle ) ) {
-				if ( $file != '.' && $file != '..' ) {
-					if ( is_dir( $source . '/' . $file ) )
-						self::copy( $source . '/' . $file, $dest . '/' . $sourcefolder );
-					else
-						copy( $source . '/' . $file, $dest . '/' . $file );
+			wp_mkdir_p( $destination );
+			$directory = dir( $source );
+			while ( false !== ( $readdirectory = $directory->read() ) ) {
+				if ( '.' == $readdirectory || '..' == $readdirectory )
+					continue;
+				$pathdir = $source . '/' . $readdirectory; 
+				if ( is_dir( $pathdir ) ) {
+					self::copy( $pathdir, $destination . '/' . $readdirectory );
+					continue;
 				}
+				copy( $pathdir, $destination . '/' . $readdirectory );
 			}
-		closedir( $dir_handle );
+			$directory->close();
 		} else {
-			copy( $source, $dest );
+			copy( $source, $destination );
 		}
 	}
 
+	/**
+	 * Checks to see if a post has any children.
+	 * 
+	 * @param int $post_id 
+	 * @return array Array of posts, or empty array if none.
+	 */
 	private static function has_children( $post_id ) {
-		return get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_parent' => absint( $post_id ) ) );
+		return get_posts( array( 'numberposts' => -1, 'post_type' => 'any', 'post_status' => 'any', 'post_parent' => absint( $post_id ) ) );
 	}
 
 }
 
-add_action( 'plugins_loaded', array( 'WP_Site_Consolidator', 'init' ) );
+/**
+ * After much hackery and tomfoolery, I think this is probably as decent a solution as we'll get to ensure the taxonomy API
+ * is relatively portable in a switch_to_blog() setting.
+ * 
+ * Will this scale? No. 
+ * Is this hyper-performant? No.
+ * Should it work marvelously for this specific use case?  You betcha.
+ * 
+ * This is essentially a wrapper function for the native WP Taxonomy API.  Sends requests.
+ * 
+ */
+class WP_JSON_Taxonomy_API {
+
+	/**
+	 * The site URL for the blog ID provided
+	 *
+	 * @since 1.0
+	 * @var string
+	 * @access private
+	 */
+	private $_site_url;
+
+	public function __construct( $blog_id ) {
+
+		$this->_site_url = esc_url_raw( get_blog_details( $blog_id )->siteurl . '?json_api=true&function=' );
+		return $this;
+	}
+
+	public function get_taxonomies() {
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_taxonomies' ) ) );
+	}
+
+	public function get_terms( $taxonomies, $args = array() ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'taxonomies' => $taxonomies, 
+				'args'       => $args 
+				) 
+			) 
+		);
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_terms&' . $query ) ) );
+	}
+
+	public function get_objects_in_term( $term_ids, $taxonomies, $args = array() ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'term_ids'   => $term_ids, 
+				'taxonomies' => $taxonomies, 
+				'args'       => $args 
+				) 
+			) 
+		);
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_objects_in_term&' . $query ) ) );
+	}
+
+	public function get_term_by( $field, $value, $taxonomy, $output = OBJECT, $filter = 'raw' ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'field'    => $field, 
+				'value'    => $value, 
+				'taxonomy' => $taxonomy,
+				'output'   => $output,
+				'filter'   => $filter
+				) 
+			) 
+		);
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'get_term_by&' . $query ) ) );
+	}
+
+	public function taxonomy_exists( $taxonomy ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'taxonomy' => $taxonomy
+				) 
+			) 
+		);
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'taxonomy_exists&' . $query ) ) );
+	}
+
+	public function term_exists( $term, $taxonomy, $parent = '' ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'term'     => $term, 
+				'taxonomy' => $taxonomy, 
+				'parent'   => $parent
+				) 
+			) 
+		);
+		$result = json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'term_exists&' . $query ) ) );
+		
+		return ! is_null( $result ) && 0 !== $result;
+	}
+
+	public function wp_insert_term( $term, $taxonomy, $args = array() ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'term'     => $term, 
+				'taxonomy' => $taxonomy, 
+				'args'     => $args
+				) 
+			) 
+		);
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'wp_insert_term&' . $query ) ) );
+	}
+
+	public function wp_set_object_terms( $object_id, $terms, $taxonomy, $append = false ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'object_id' => $object_id, 
+				'terms'     => $terms, 
+				'taxonomy'  => $taxonomy,
+				'append'    => $append
+				) 
+			) 
+		);
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'wp_set_object_terms&' . $query ) ) );
+	}
+
+}
+
+/**
+ * 
+ * This is essentially a wrapper function for the native WP Taxonomy API.  Receives requests.  Sends responses.
+ * A bit of props to westi for the JSON endpoint code on trac
+ * 
+ * @package WP_JSON_Taxonomy_API
+ */
+class WP_JSON_Taxonomy_API_Handler {
+
+	private static $instance;
+
+	public function __construct() {
+		add_action( 'init'             , array( $this, 'init' ) );
+		add_action( 'request'          , array( $this, 'request' ) );
+		add_action( 'template_redirect', array( $this, 'template_redirect' ) );
+	}
+
+	public function get_instance() {
+		if ( empty( self::$instance ) )
+			self::$instance = new WP_JSON_Taxonomy_API_Handler();
+
+		return self::$instance;
+	}
+
+	public function init() {
+
+		add_rewrite_endpoint( 'json_api', EP_ROOT ^ EP_PERMALINK ^ EP_ALL );
+	}
+
+	public function request( $query_vars ) {
+		if ( isset( $query_vars['json_api'] ) )
+			$query_vars['json_api'] = true;
+
+		return $query_vars;
+	}
+
+	public function template_redirect() {
+		if ( ! get_query_var( 'json_api' ) ) 
+			return true;
+
+ 		$function = esc_attr( $_GET['function'] );
+ 
+ 		if ( ! function_exists( $function ) )
+ 			return true;
+
+ 		if ( ! isset( $_GET['args'] ) )
+			die( json_encode( $function() ) );
+
+		die( json_encode( call_user_func_array( $function, $_GET['args'] ) ) );
+	}
+
+}
+
+add_action( 'plugins_loaded' , array( 'WP_Site_Consolidator'        , 'init' ) );
+add_action( 'plugins_loaded' , array( 'WP_JSON_Taxonomy_API_Handler', 'get_instance' ) );
 
 ?>
