@@ -17,6 +17,15 @@ class WP_Site_Consolidator {
 	 * @var array
 	 * @access private
 	 */
+	private static $instance = array();
+
+	/**
+	 * Stores the list of posts for the current singular migration
+	 *
+	 * @since 1.0
+	 * @var array
+	 * @access private
+	 */
 	private static $_posts = array();
 
 	/**
@@ -47,6 +56,22 @@ class WP_Site_Consolidator {
 	private static $_old_new_comments = array();
 
 	/**
+	 * Lets other classes know if this instance requires Basic Authentication
+	 * Useful when using the taxonomy API on a network that requires Basic Authentication
+	 *
+	 * @since 1.0
+	 * @var boolean
+	 * @access private
+	 */
+	private $_basic_auth = false;
+
+	public function get_instance() {
+		if ( empty( self::$instance ) )
+			self::$instance = new WP_Site_Consolidator();
+
+		return self::$instance;
+	}
+	/**
 	 * What we have here is no failure to communicate
 	 * 
 	 * We're doing a couple things, really.  Building out a UI to consolidate sites, for one.  Site consolidation is :
@@ -69,6 +94,10 @@ class WP_Site_Consolidator {
 		add_action( 'admin_print_styles-admin_page_site-consolidator' , array( __CLASS__, 'print_styles' ) );
 		add_action( 'admin_print_footer_scripts'                      , array( __CLASS__, 'print_scripts' ) );
 		add_action( 'load-admin_page_site-consolidator'               , array( __CLASS__, 'process_consolidation' ) );
+	}
+
+	public static function is_auth_required() {
+		return $this->_basic_auth;
 	}
 
 	/**
@@ -212,7 +241,6 @@ class WP_Site_Consolidator {
 					alert(auto_consolidate_error);
 				}
 
-
 			});
 
 		});
@@ -284,6 +312,7 @@ class WP_Site_Consolidator {
 		}
 
 		delete_blog_option( $new_id, 'rewrite_rules' );
+
 		wp_suspend_cache_addition( false );
 		wp_suspend_cache_invalidation( false );
 	}
@@ -518,7 +547,7 @@ class WP_Site_Consolidator {
 		switch_to_blog( $new_id );
 		
 		foreach ( self::$_old_new_relationship as $old_post_id => $new_post_id )
-			if ( false !== ( $old_thumb_id = get_post_meta( $new_post_id, '_thumbnail_id', true ) ) )
+			if ( false !== ( $old_thumb_id = get_post_meta( $new_post_id, '_thumbnail_id', true ) ) && isset( self::$_old_new_relationship[$old_thumb_id] ) )
 				update_post_meta( $new_post_id, '_thumbnail_id', self::$_old_new_relationship[$old_thumb_id] );
 
 		restore_current_blog();
@@ -576,6 +605,8 @@ class WP_Site_Consolidator {
  * 
  * This is essentially a wrapper function for the native WP Taxonomy API.  Sends requests.
  * 
+ * @todo Support Basic Authentication.  Check for 401, allow user to provide creds, re-try.
+ * 
  */
 class WP_JSON_Taxonomy_API {
 
@@ -588,10 +619,30 @@ class WP_JSON_Taxonomy_API {
 	 */
 	private $_site_url;
 
+	const BASIC_AUTH_USERNAME = 'ybtest';
+	const BASIC_AUTH_PASSWORD = 'abc123';
+
 	public function __construct( $blog_id ) {
 
 		$this->_site_url = esc_url_raw( get_blog_details( $blog_id )->siteurl . '?json_api=true&function=' );
+		$this->maybe_authorize();
 		return $this;
+	}
+
+	/**
+	 * Should add UI, workflow for letting users know that their endpoint requires authentication.  
+	 * In the meantime, hardcoded.
+	 * 
+	 * @return type
+	 */
+	private static function maybe_authorize() {
+		add_filter( 'http_request_args', array( __CLASS__, 'basic_auth' ), 10, 2 );
+	}
+
+	public static function basic_auth( $args, $url ) {
+		
+		$args['headers']['Authorization'] = 'Basic ' . base64_encode( 'ybtest:abc123' );
+		return $args;
 	}
 
 	public function get_taxonomies() {
