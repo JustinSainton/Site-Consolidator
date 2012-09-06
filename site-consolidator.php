@@ -342,16 +342,8 @@ class WP_Site_Consolidator {
 		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
 
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
-		foreach ( $tax_api->get_taxonomies() as $tax ) {
-			$terms = $tax_api->get_terms( $tax, array( 'hide_empty' => false ) );
-			if ( ! empty( $terms ) ) {
-				foreach ( $terms as $term ) {
-					self::$_tax_object[$tax][$term->slug] = $tax_api->get_objects_in_term( $term->term_id, $tax );
-					if ( $term->parent )
-						self::$_tax_object[$tax][$term->slug]['parent'] = $tax_api->get_term_by( 'id', $term->parent, $tax )->slug;
-				}
-			}
-		}
+		self::$_tax_object = $tax_api->build_from_site_taxonomy_object();		
+
 		//Builds array of posts, child posts and post meta (for each)
 		foreach ( $old_posts as $post ) {
 
@@ -419,43 +411,8 @@ class WP_Site_Consolidator {
 
 		$new_tax_api = new WP_JSON_Taxonomy_API( $new_blog_id );
 
-		//Inserts terms, if the taxonomy exists and the term doesn't
-		foreach ( self::$_tax_object as $tax => $terms ) {
-
-			//If the taxonomy doesn't exist, we're not going to do the hackery necessary to register taxonomies via saved options and work-around activation routines, etc.
-			if ( $new_tax_api->taxonomy_exists( $tax ) ) {
-
-				foreach( $terms as $term => $objects_in_term ) {
-					if ( isset( self::$_tax_object[$tax][$term]['parent'] ) )
-						$parent = self::$_tax_object[$tax][$term]['parent'];
-					else 
-						$parent = false;
-					//If the term already exists, we're not going to override it.  That'd just be silly.
-					if ( ! $new_tax_api->term_exists( $term, $tax ) ) {
-						//This is a bit of a hacky way to ensure we've set up the parent first
-						if ( $parent && ! $new_tax_api->term_exists( $parent, $tax ) ) {
-							//Sets up parent term first.  We'll set up the child term outside the check.
-							$name = $tax_api->get_term_by( 'slug', $parent, $tax )->name;
-							$new_tax_api->wp_insert_term( $name, $tax );
-						}
-
-						$name = $tax_api->get_term_by( 'slug', $term, $tax )->name;
-						//Now we insert the term.  We've already created the parent term if it didn't exist.  Now we just conditionally add a parent if we need to.
-						$new_tax_api->wp_insert_term( $name, $tax, array( 'parent' => ( $parent ) ? $new_tax_api->get_term_by( 'slug', $parent, $tax )->term_id : 0 ) );
-					}
-				}
-			}
-		}
-
-		//Create term / object relationships
-		foreach ( self::$_tax_object as $tax => $terms ) {
-			foreach( $terms as $term => $objects_in_term ) {
-				foreach( $objects_in_term as $object_id ) {
-					if ( isset( self::$_old_new_relationship[$object_id] ) )
-						$new_tax_api->wp_set_object_terms( self::$_old_new_relationship[$object_id], $term, $tax, true );
-				}
-			}
-		}
+		//Passes old_site tax API object.  We do need this one call to get the names.  
+		$new_tax_api->build_to_site_taxonomy_object( self::$_tax_object, $tax_api, self::$_old_new_relationship );
 
 		restore_current_blog(); //To be honest - not sure if this is even necessary since we're running as a network tool
 	}
@@ -742,6 +699,16 @@ class WP_JSON_Taxonomy_API {
 		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'wp_set_object_terms&' . $query ) ) );
 	}
 
+	public function build_from_site_taxonomy_object() {
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_from_site_taxonomy_object' ) ) );		
+	}
+	
+	public function build_to_site_taxonomy_object() {
+
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_from_site_taxonomy_object' ) ) );	
+	}
+
 }
 
 /**
@@ -795,6 +762,72 @@ class WP_JSON_Taxonomy_API_Handler {
 		die( json_encode( call_user_func_array( $function, $_GET['args'] ) ) );
 	}
 
+}
+
+function build_from_site_taxonomy_object() {
+
+	$tax_object = array();
+	foreach ( get_taxonomies() as $tax ) {
+		$terms = get_terms( $tax, array( 'hide_empty' => false ) );
+		if ( ! empty( $terms ) ) {
+			foreach ( $terms as $term ) {
+				$tax_object[$tax][$term->slug] = get_objects_in_term( $term->term_id, $tax );
+				if ( $term->parent )
+					$tax_object[$tax][$term->slug]['parent'] = get_term_by( 'id', $term->parent, $tax )->slug;
+			}
+		}
+	}
+
+	return $tax_object;
+}
+
+/**
+ * We may potentially put the kabosh on the $tax_api variable.  We could probably further optimize to kill off the two get_term_by calls.
+ * 
+ * @param type $tax_object 
+ * @param type $tax_api 
+ * @param type $old_new_relationship 
+ * @return type
+ */
+function build_to_site_taxonomy_object( $tax_object, $tax_api, $old_new_relationship ) {
+
+//Inserts terms, if the taxonomy exists and the term doesn't
+	foreach ( $tax_object as $tax => $terms ) {
+
+		//If the taxonomy doesn't exist, we're not going to do the hackery necessary to register taxonomies via saved options and work-around activation routines, etc.
+		if ( taxonomy_exists( $tax ) ) {
+
+			foreach( $terms as $term => $objects_in_term ) {
+				if ( isset( $tax_object[$tax][$term]['parent'] ) )
+					$parent = $tax_object[$tax][$term]['parent'];
+				else 
+					$parent = false;
+				//If the term already exists, we're not going to override it.  That'd just be silly.
+				if ( ! term_exists( $term, $tax ) ) {
+					//This is a bit of a hacky way to ensure we've set up the parent first
+					if ( $parent && ! term_exists( $parent, $tax ) ) {
+						//Sets up parent term first.  We'll set up the child term outside the check.
+						$name = $tax_api->get_term_by( 'slug', $parent, $tax )->name;
+						wp_insert_term( $name, $tax );
+					}
+
+					$name = $tax_api->get_term_by( 'slug', $term, $tax )->name;
+					//Now we insert the term.  We've already created the parent term if it didn't exist.  Now we just conditionally add a parent if we need to.
+					wp_insert_term( $name, $tax, array( 'parent' => ( $parent ) ? get_term_by( 'slug', $parent, $tax )->term_id : 0 ) );
+				}
+			}
+		}
+	}
+
+	//Create term / object relationships
+	foreach ( $tax_object as $tax => $terms ) {
+		foreach( $terms as $term => $objects_in_term ) {
+			foreach( $objects_in_term as $object_id ) {
+				if ( isset( $old_new_relationship[$object_id] ) )
+					wp_set_object_terms( $old_new_relationship[$object_id], $term, $tax, true );
+			}
+		}
+	}
 }
 
 add_action( 'plugins_loaded' , array( 'WP_Site_Consolidator'        , 'init' ) );
