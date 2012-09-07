@@ -342,7 +342,7 @@ class WP_Site_Consolidator {
 		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
 
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
-		self::$_tax_object = $tax_api->build_from_site_taxonomy_object();		
+		self::$_tax_object = $tax_api->build_from_site_taxonomy_object();	
 
 		//Builds array of posts, child posts and post meta (for each)
 		foreach ( $old_posts as $post ) {
@@ -412,7 +412,7 @@ class WP_Site_Consolidator {
 		$new_tax_api = new WP_JSON_Taxonomy_API( $new_blog_id );
 
 		//Passes old_site tax API object.  We do need this one call to get the names.  
-		$new_tax_api->build_to_site_taxonomy_object( self::$_tax_object, $tax_api, self::$_old_new_relationship );
+		$new_tax_api->build_to_site_taxonomy_object( self::$_tax_object, $old_blog_id, self::$_old_new_relationship );
 
 		restore_current_blog(); //To be honest - not sure if this is even necessary since we're running as a network tool
 	}
@@ -582,7 +582,7 @@ class WP_JSON_Taxonomy_API {
 	public function __construct( $blog_id ) {
 
 		$this->_site_url = esc_url_raw( get_blog_details( $blog_id )->siteurl . '?json_api=true&function=' );
-		$this->maybe_authorize();
+		//$this->maybe_authorize();
 		return $this;
 	}
 
@@ -704,9 +704,16 @@ class WP_JSON_Taxonomy_API {
 		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_from_site_taxonomy_object' ) ) );		
 	}
 	
-	public function build_to_site_taxonomy_object() {
-
-		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_from_site_taxonomy_object' ) ) );	
+	public function build_to_site_taxonomy_object( $tax_obj, $blog_id, $old_new ) {
+		$query = http_build_query( array( 
+			'args' => array( 
+				'tax_object'           => $tax_obj, 
+				'blog_id'              => $blog_id, 
+				'old_new_relationship' => $old_new
+				) 
+			) 
+		);
+		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_to_site_taxonomy_object&' . $query ) ) );	
 	}
 
 }
@@ -785,11 +792,13 @@ function build_from_site_taxonomy_object() {
  * We may potentially put the kabosh on the $tax_api variable.  We could probably further optimize to kill off the two get_term_by calls.
  * 
  * @param type $tax_object 
- * @param type $tax_api 
+ * @param type $blog_id 
  * @param type $old_new_relationship 
  * @return type
  */
-function build_to_site_taxonomy_object( $tax_object, $tax_api, $old_new_relationship ) {
+function build_to_site_taxonomy_object( $tax_object, $blog_id, $old_new_relationship ) {
+
+$tax_api = new WP_JSON_Taxonomy_API( $blog_id );
 
 //Inserts terms, if the taxonomy exists and the term doesn't
 	foreach ( $tax_object as $tax => $terms ) {
@@ -798,8 +807,8 @@ function build_to_site_taxonomy_object( $tax_object, $tax_api, $old_new_relation
 		if ( taxonomy_exists( $tax ) ) {
 
 			foreach( $terms as $term => $objects_in_term ) {
-				if ( isset( $tax_object[$tax][$term]['parent'] ) )
-					$parent = $tax_object[$tax][$term]['parent'];
+				if ( isset( $tax_object[$tax][$term]->parent ) )
+					$parent = $tax_object[$tax][$term]->parent;
 				else 
 					$parent = false;
 				//If the term already exists, we're not going to override it.  That'd just be silly.
