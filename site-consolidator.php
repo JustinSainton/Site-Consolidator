@@ -130,6 +130,7 @@ class WP_Site_Consolidator {
 	 * @return html
 	 */
 	public static function site_consolidator_view() {
+
 		?>
 		<form method="post">
 		<div class="wrap">
@@ -293,7 +294,7 @@ class WP_Site_Consolidator {
 			unset( $old_ids[$key_check] );
 
 		//More or less arbitrary - but the HTTP Taxonomy API is going to take quite a bit of time.
-		set_time_limit( 250 );
+		set_time_limit( 7200 );
 
 		wp_suspend_cache_addition( true );
 		wp_suspend_cache_invalidation( true );
@@ -342,7 +343,13 @@ class WP_Site_Consolidator {
 		$tax_api = new WP_JSON_Taxonomy_API( $old_blog_id );
 
 		//Rather than grabbing taxonomies in each post, we can build an array of [tax_slug] => [terms_slug] => object_ids to use with the migration.  I think.
-		self::$_tax_object = $tax_api->build_from_site_taxonomy_object();	
+		self::$_tax_object = $tax_api->build_from_site_taxonomy_object();
+
+		if ( empty( self::$_tax_object ) )	
+			self::$_tax_object = $tax_api->build_from_site_taxonomy_object();
+
+
+		//die( 'array<pre />' . print_r( self::$_tax_object, 1 ) );
 
 		//Builds array of posts, child posts and post meta (for each)
 		foreach ( $old_posts as $post ) {
@@ -409,10 +416,16 @@ class WP_Site_Consolidator {
 			}
 		}
 
+		if ( false === update_option( $old_blog_id . '_' . $new_blog_id . '_tax_object', self::$_tax_object ) )
+			update_option( $old_blog_id . '_' . $new_blog_id . '_tax_object', self::$_tax_object );
+		
+		if ( false === update_option( $old_blog_id . '_' . $new_blog_id . '_relationship_object', self::$_old_new_relationship ) )
+			update_option( $old_blog_id . '_' . $new_blog_id . '_relationship_object', self::$_old_new_relationship );
+
 		$new_tax_api = new WP_JSON_Taxonomy_API( $new_blog_id );
 
-		//Passes old_site tax API object.  We do need this one call to get the names.  
-		$new_tax_api->build_to_site_taxonomy_object( self::$_tax_object, self::$_old_new_relationship );
+		//Passes old_site tax API object.
+		$new_tax_api->build_to_site_taxonomy_object( $old_blog_id, $new_blog_id );
 
 		restore_current_blog(); //To be honest - not sure if this is even necessary since we're running as a network tool
 	}
@@ -583,6 +596,7 @@ class WP_JSON_Taxonomy_API {
 
 		$this->_site_url = esc_url_raw( get_blog_details( $blog_id )->siteurl . '?json_api=true&function=' );
 		//$this->maybe_authorize();
+		$this->increase_timeout();
 		return $this;
 	}
 
@@ -596,10 +610,18 @@ class WP_JSON_Taxonomy_API {
 		add_filter( 'http_request_args', array( __CLASS__, 'basic_auth' ), 10, 2 );
 	}
 
+	private static function increase_timeout() {
+		add_filter( 'http_request_timeout', array( __CLASS__, 'timeout' ), 10 );
+	}
+
 	public static function basic_auth( $args, $url ) {
 		
 		$args['headers']['Authorization'] = 'Basic ' . base64_encode( 'ybtest:abc123' );
 		return $args;
+	}
+	public static function timeout() {
+		
+		return 600;
 	}
 
 	public function get_taxonomies() {
@@ -704,15 +726,14 @@ class WP_JSON_Taxonomy_API {
 		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_from_site_taxonomy_object' ) ), true );		
 	}
 	
-	public function build_to_site_taxonomy_object( $tax_obj, $old_new ) {
-		$query = http_build_query( array( 
-			'args' => array( 
-				'tax_object'           => $tax_obj, 
-				'old_new_relationship' => $old_new
+	public function build_to_site_taxonomy_object( $old_blog_id, $new_blog_id ) {
+		$query = array( 
+			'body' => array( 
+				'old_blog_id' => $old_blog_id,
+				'new_blog_id' => $new_blog_id
 				) 
-			) 
-		);
-		return json_decode( wp_remote_retrieve_body( wp_remote_get( $this->_site_url . 'build_to_site_taxonomy_object&' . $query ) ) );	
+			);
+		return json_decode( wp_remote_retrieve_body( wp_remote_post( $this->_site_url . 'build_to_site_taxonomy_object', $query ) ) );	
 	}
 
 }
@@ -762,6 +783,9 @@ class WP_JSON_Taxonomy_API_Handler {
  		if ( ! function_exists( $function ) )
  			return true;
 
+ 		if ( 'build_to_site_taxonomy_object' == $function )
+			die( json_encode( call_user_func_array( $function, array( $_POST['old_blog_id'], $_POST['new_blog_id'] ) ) ) );
+
  		if ( ! isset( $_GET['args'] ) )
 			die( json_encode( $function() ) );
 
@@ -770,12 +794,25 @@ class WP_JSON_Taxonomy_API_Handler {
 
 }
 
+//Todo - place these three functions in class.
+
+function parent_compare( $a, $b ) {
+		$ap = $a->parent;
+		$bp = $b->parent;
+
+		if ( $ap == $bp )
+			return 0;
+		return ( $ap > $bp ) ? 1 : -1;
+}
+
 function build_from_site_taxonomy_object() {
 
 	$tax_object = array();
 	foreach ( get_taxonomies() as $tax ) {
 		$terms = get_terms( $tax, array( 'hide_empty' => false ) );
+
 		if ( ! empty( $terms ) ) {
+			usort( $terms, 'parent_compare' );
 			foreach ( $terms as $term ) {
 				$tax_object[$tax][$term->slug] = get_objects_in_term( $term->term_id, $tax );
 				$tax_object[$tax][$term->slug]['name'] = get_term_by( 'slug', $term->slug, $tax )->name;
@@ -792,11 +829,17 @@ function build_from_site_taxonomy_object() {
  * We may potentially put the kabosh on the $tax_api variable.  We could probably further optimize to kill off the two get_term_by calls.
  * 
  * @param  type $tax_object 
- * @param  type $blog_id 
  * @param  type $old_new_relationship 
  * @return type
  */
-function build_to_site_taxonomy_object( $tax_object, $old_new_relationship ) {
+function build_to_site_taxonomy_object( $old_blog_id, $new_blog_id ) {
+	global $blog_id;
+
+	$tax_object	          = get_option( $old_blog_id . '_' . $new_blog_id . '_tax_object' );
+	$old_new_relationship =	get_option( $old_blog_id . '_' . $new_blog_id . '_relationship_object' );
+
+	$return_tax_object = array();
+	$return_set_tax_object = array();
 
 	//Inserts terms, if the taxonomy exists and the term doesn't
 	foreach ( $tax_object as $tax => $terms ) {
@@ -811,16 +854,12 @@ function build_to_site_taxonomy_object( $tax_object, $old_new_relationship ) {
 				//If the term already exists, we're not going to override it.  That'd just be silly.
 				if ( ! term_exists( $term, $tax ) ) {
 
-					//This is a bit of a hacky way to ensure we've set up the parent first
-					if ( $parent && ! term_exists( $parent, $tax ) ) {
-
-						//Sets up parent term first.  We'll set up the child term outside the check.
-						wp_insert_term( $name, $tax );
-					}
-
 					//Now we insert the term.  We've already created the parent term if it didn't exist.  Now we just conditionally add a parent if we need to.
-					wp_insert_term( $name, $tax, array( 'parent' => ( $parent ) ? get_term_by( 'slug', $parent, $tax )->term_id : 0 ) );
+					$return_tax_object[$tax][$term] = wp_insert_term( $name, $tax, array( 'parent' => ( $parent ) ? get_term_by( 'slug', $parent, $tax )->term_id : 0, 'slug' => $term ) );
+				} else {
+					$return_tax_object[$tax][$term] = 'This term exists for this taxonomy already';
 				}
+
 			}
 		}
 	}
@@ -830,7 +869,7 @@ function build_to_site_taxonomy_object( $tax_object, $old_new_relationship ) {
 		foreach( $terms as $term => $objects_in_term ) {
 			foreach( $objects_in_term as $object_id ) {
 				if ( isset( $old_new_relationship[$object_id] ) )
-					wp_set_object_terms( $old_new_relationship[$object_id], $term, $tax, true );
+					$return_set_tax_object[$object_id] = wp_set_object_terms( $old_new_relationship[$object_id], $term, $tax, true );
 			}
 		}
 	}
@@ -838,6 +877,9 @@ function build_to_site_taxonomy_object( $tax_object, $old_new_relationship ) {
 	//Prime taxonomy caches
 	foreach ( array_keys( $tax_object ) as $tax )
 		delete_option( "{$tax}_children" );
+
+	return $obj;
+
 }
 
 add_action( 'plugins_loaded' , array( 'WP_Site_Consolidator'        , 'init' ) );
